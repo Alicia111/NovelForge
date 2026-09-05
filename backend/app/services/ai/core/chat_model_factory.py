@@ -119,8 +119,22 @@ def build_chat_model_from_payload(
         }
         if thinking_enabled is not None:
             model_kwargs["include_thoughts"] = thinking_enabled
+        thinking_budget = None
+        if thinking_enabled is not True:
+            # Gemini 2.5 系列默认开启“动态思考”：模型先做一段不可见推理，期间不产出
+            # 任何 token，思考完才把正文近乎一次性倒出，观感上等同于没有流式输出。
+            # 续写 / 润色这类创作任务不需要长链推理，未显式要求思考时就关掉它。
+            # 2.5 Pro 不允许完全关闭（预算下限 128），其余系列可直接设为 0。
+            thinking_budget = 128 if "pro" in model_name.lower() else 0
+            model_kwargs["thinking_budget"] = thinking_budget
         if common_kwargs.get("max_tokens") is not None:
-            model_kwargs["max_output_tokens"] = common_kwargs["max_tokens"]
+            max_output_tokens = common_kwargs["max_tokens"]
+            if thinking_budget:
+                # 思考 token 会从 max_output_tokens 里扣（googleapis/python-genai#782）。
+                # 续写的 max_tokens 常按目标字数算得很小，不预留的话会被思考耗尽整个
+                # 预算，导致正文 0 字、finish_reason=MAX_TOKENS。
+                max_output_tokens += thinking_budget
+            model_kwargs["max_output_tokens"] = max_output_tokens
         if common_kwargs.get("temperature") is not None:
             model_kwargs["temperature"] = common_kwargs["temperature"]
         if common_kwargs.get("timeout") is not None:
