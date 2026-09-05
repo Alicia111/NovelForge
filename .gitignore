@@ -68,3 +68,16 @@ backend/build
 
 # Node modules
 node_modules/
+
+# ===== fork 自订 =====
+# 数据库备份档
+backend/*.db.bak-*
+*.sqlite
+*.sqlite3
+
+# TypeScript 增量编译快取
+*.tsbuildinfo
+
+# Claude Code：忽略本机设定，但保留技能定义
+.claude/settings.local.json
+!.claude/**/*.md
