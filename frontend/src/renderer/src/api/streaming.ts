@@ -29,6 +29,22 @@ export function createSSEStreamingRequest(params: SSERequestParams) {
   const { endpoint, body, onMessage, onClose, onError } = params
   const controller = new AbortController()
   const signal = controller.signal
+  // 服务端以 error 事件显式上报流中异常（见 backend/app/utils/stream_utils.py）：
+  // 此时连接仍会正常收尾，若不拦截，消费方会在跑完错误处理后又跑一遍成功收尾
+  // （例如编辑器先提示“续写失败”再提示“续写完成”，并把半截输出留在文档里）。
+  // failed 保证 onError 与 onClose 互斥，且各自最多触发一次。
+  let failed = false
+
+  const finish = () => {
+    if (failed) return
+    onClose()
+  }
+
+  const fail = (err: any) => {
+    if (failed) return
+    failed = true
+    onError?.(err)
+  }
 
   fetch(endpoint, {
     method: 'POST',
@@ -55,7 +71,7 @@ export function createSSEStreamingRequest(params: SSERequestParams) {
     function pump() {
       reader.read().then(({ done, value }) => {
         if (done) {
-          onClose()
+          finish()
           return
         }
 
@@ -70,31 +86,38 @@ export function createSSEStreamingRequest(params: SSERequestParams) {
             .map(line => line.slice(6))
           if (!dataLines.length) continue
 
+          let payload: any
           try {
-            const payload = JSON.parse(dataLines.join(''))
-            onMessage(payload)
+            payload = JSON.parse(dataLines.join(''))
           } catch {
-            // ignore malformed chunk
+            continue // ignore malformed chunk
           }
+          // error 事件是终结性的：上报后立即中止读取，不再交给 onMessage
+          if (typeof payload?.error === 'string' && payload.error.length) {
+            fail(new Error(payload.error))
+            controller.abort()
+            return
+          }
+          onMessage(payload)
         }
 
         pump()
       }).catch(error => {
         if (error?.name === 'AbortError') {
-          onClose()
+          finish()
           return
         }
-        onError?.(error)
+        fail(error)
       })
     }
 
     pump()
   }).catch(error => {
     if (error?.name === 'AbortError') {
-      onClose()
+      finish()
       return
     }
-    onError?.(error)
+    fail(error)
   })
 
   return {
