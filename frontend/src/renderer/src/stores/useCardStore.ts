@@ -232,8 +232,9 @@ export const useCardStore = defineStore('card', () => {
           }
         }
       }
-    } catch (error) {
-      ElMessage.error('Failed to update card.')
+    } catch (error: any) {
+      const detail = error?.response?.data?.detail || error?.response?.data?.message || error?.message
+      ElMessage.error(detail ? `Failed to update card: ${detail}` : 'Failed to update card.')
       console.error(error)
     }
   }

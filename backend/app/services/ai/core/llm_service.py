@@ -16,6 +16,7 @@ from app.services.ai.generation.continuation_budget_runtime import (
     build_round_plan,
     count_text_units,
     estimate_required_call_count,
+    normalize_budget_scope,
     normalize_word_control_mode,
     trim_generated_text,
 )
@@ -291,6 +292,12 @@ async def generate_continuation_streaming(
         current_word_count = count_text_units(getattr(request, "previous_content", ""))
 
     control_mode = normalize_word_control_mode(request)
+    # per_run 口径下，本次预算相对「开轮前的字数」计算；先钉住基线，
+    # 否则每轮正文变长都会让剩余额度被重新算掉。
+    budget_scope = normalize_budget_scope(request)
+    budget_baseline = current_word_count if budget_scope == "per_run" else None
+    if budget_baseline is not None:
+        request = request.model_copy(update={"budget_baseline_word_count": budget_baseline})
     expected_rounds = estimate_required_call_count(request)
     if control_mode == "prompt_only" or expected_rounds <= 1:
         round_plan = build_round_plan(request, current_word_count, 1)
@@ -312,6 +319,7 @@ async def generate_continuation_streaming(
             "previous_content": current_content,
             "existing_word_count": current_word_count,
             "word_control_mode": control_mode,
+            "budget_baseline_word_count": budget_baseline,
             "budget_round_hint": round_plan.round_index,
             "remaining_word_count_hint": round_plan.remaining_word_count,
             "is_final_round_hint": round_plan.is_final_round,
@@ -351,8 +359,10 @@ async def generate_continuation_streaming(
         if trim_result.trimmed and not getattr(request, "stream", False):
             logger.info("续写预算运行时在第 {} 轮触发句边界收束。", round_index)
             break
-        if target_word_count is not None and current_word_count >= target_word_count:
-            break
+        if target_word_count is not None:
+            written = current_word_count - budget_baseline if budget_baseline is not None else current_word_count
+            if written >= target_word_count:
+                break
         if round_plan.is_final_round:
             break
 
@@ -451,12 +461,36 @@ async def _stream_continuation_single_round(
         and round_plan.hard_word_limit
     )
     should_stop_current_round = False
+    block_reason: str | None = None
 
     try:
         logger.debug("正在以LangChain ChatModel流式生成续写内容")
         async for chunk in model.astream(messages):
             content = getattr(chunk, "content", None)
             if not content:
+                # 内容为空时检查是否被安全策略拦截（Gemini/OpenAI/Anthropic均通过
+                # response_metadata 传递 finish_reason/block_reason，而不是抛异常）
+                meta = getattr(chunk, "response_metadata", None) or {}
+                finish_reason = meta.get("finish_reason")
+                prompt_feedback = meta.get("prompt_feedback")
+                # langchain-google-genai 把 prompt_feedback 存成 `.model_dump()`
+                # 后的普通 dict（不是带属性的对象），之前用 getattr 取
+                # block_reason 永远拿不到值，导致这里检测不出真正的拦截原因。
+                block_reason_value = None
+                if isinstance(prompt_feedback, dict):
+                    block_reason_value = prompt_feedback.get("block_reason")
+                elif prompt_feedback is not None:
+                    block_reason_value = getattr(prompt_feedback, "block_reason", None)
+                block = None
+                if block_reason_value:
+                    block = f"prompt_feedback.block_reason={block_reason_value}"
+                elif finish_reason in ("SAFETY", "content_filter", "PROHIBITED_CONTENT", "RECITATION"):
+                    block = f"finish_reason={finish_reason}"
+                elif finish_reason == "MAX_TOKENS":
+                    block = "finish_reason=MAX_TOKENS（token 预算在正文产出前就被耗尽，通常是 max_tokens 设置过小）"
+                if block and not block_reason:
+                    block_reason = block
+                    logger.warning(f"续写流式生成检测到空输出: {block}")
                 continue
 
             if isinstance(content, str):
@@ -516,6 +550,21 @@ async def _stream_continuation_single_round(
     except Exception as e:
         logger.error(f"流式LLM调用失败: {e}")
         raise
+
+    if not accumulated.strip():
+        # 流式调用未抛异常但完全没有产出内容：多半是被安全策略拦截，
+        # 此处补记一次已用量（避免用户被静默扣费却查不到原因）后显式报错，
+        # 让前端能提示用户而不是误显示“续写完成”
+        if track_stats:
+            in_tokens = calc_input_tokens(system_prompt, user_prompt)
+            record_usage(
+                session, request.llm_config_id,
+                in_tokens, 0,
+                calls=1, aborted=True
+            )
+        if block_reason:
+            raise ValueError(f"模型未产出正文内容（{block_reason}），请调整描述或参数后重试")
+        raise ValueError("模型未返回任何内容，请稍后重试或更换模型")
 
     # 正常结束后统计
     try:

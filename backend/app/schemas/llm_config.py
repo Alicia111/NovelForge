@@ -65,7 +65,8 @@ class LLMConnectionTest(SQLModel):
     provider: str
     model_name: str
     api_base: Optional[str] = None
-    api_key: str
+    # Google 支持留空走 ADC（Vertex AI）鉴权，其他供应商由 chat_model_factory 校验
+    api_key: Optional[str] = None
     api_protocol: LLMApiProtocol = "chat_completions"
     custom_request_path: Optional[str] = None
     user_agent: Optional[str] = None
@@ -73,7 +74,7 @@ class LLMConnectionTest(SQLModel):
 class LLMGetModelsRequest(SQLModel):
     provider: str
     api_base: Optional[str] = None
-    api_key: str
+    api_key: Optional[str] = None
     api_protocol: LLMApiProtocol = "chat_completions"
     models_path: Optional[str] = None
     user_agent: Optional[str] = None

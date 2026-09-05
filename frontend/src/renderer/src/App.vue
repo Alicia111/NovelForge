@@ -11,6 +11,7 @@ import { useUpdateStore } from './stores/useUpdateStore'
 import { useWorkflowStore } from './stores/useWorkflowStore'
 import type { components } from '@renderer/types/generated'
 import { schemaService } from './api/schema'
+import { getProject } from './api/projects'
 
 const IdeasHome = defineAsyncComponent(() => import('./views/IdeasHome.vue'))
 const CodeWorkflowEditor = defineAsyncComponent(() => import('./views/workflow/CodeWorkflowEditor.vue'))
@@ -29,11 +30,23 @@ const { currentProject } = storeToRefs(projectStore)
 function handleProjectSelected(project: Project) {
   projectStore.setCurrentProject(project)
   appStore.goToEditor()
+  writeHash(`#/editor/${project.id}`)
 }
 
 function handleBackToDashboard() {
   projectStore.reset()
   appStore.goToDashboard()
+  writeHash('#/')
+}
+
+// 自己写 hash 时要跳过 hashchange 回调，否则会二次触发视图切换
+let suppressHashSync = false
+function writeHash(hash: string) {
+  if ((window.location.hash || '') === hash) return
+  suppressHashSync = true
+  window.location.hash = hash
+  // hashchange 是异步派发的，等它跑完再解锁
+  setTimeout(() => { suppressHashSync = false }, 0)
 }
 
 function handleOpenSettings() {
@@ -49,25 +62,52 @@ const isNoHeader = computed(() => {
   return h.startsWith('#/ideas-home')
 })
 
+async function restoreEditorFromHash(projectId: number): Promise<boolean> {
+  if (currentProject.value?.id === projectId) {
+    appStore.goToEditor()
+    return true
+  }
+  try {
+    projectStore.setCurrentProject(await getProject(projectId))
+    appStore.goToEditor()
+    return true
+  } catch (error) {
+    // 项目已删除或后端没起来，退回首页而不是卡在空白编辑器
+    console.warn('恢复项目失败，返回首页:', error)
+    return false
+  }
+}
+
 async function syncViewFromHash() {
+  if (suppressHashSync) return
   const hash = window.location.hash || ''
   if (hash.startsWith('#/ideas-home')) {
     appStore.goToIdeas()
     try { await projectStore.loadFreeProject() } catch {}
+    return
   }
   if (hash.startsWith('#/workflows')) {
     appStore.goToWorkflows()
+    return
   }
   if (hash.startsWith('#/code-workflows')) {
     appStore.goToCodeWorkflows()
+    return
   }
+  const editorMatch = /^#\/editor\/(\d+)/.exec(hash)
+  if (editorMatch) {
+    if (await restoreEditorFromHash(Number(editorMatch[1]))) return
+    writeHash('#/')
+  }
+  projectStore.reset()
+  appStore.goToDashboard()
 }
 
 // 初始化主题和加载全局资源
 onMounted(async () => {
   appStore.initTheme()
   schemaService.loadSchemas() // Load all schemas on app startup
-  syncViewFromHash()
+  await syncViewFromHash()
   window.addEventListener('hashchange', syncViewFromHash)
   
   // 设置工作流监听器（监听响应头中的 X-Workflows-Started）

@@ -118,6 +118,10 @@ function createStreamingRequest(
     onClose,
     onError,
     onMessage: payload => {
+      if (typeof payload?.error === 'string' && payload.error.length) {
+        onError?.(new Error(payload.error))
+        return
+      }
       if (typeof payload?.content === 'string' && payload.content.length) {
         onData(payload.content)
         return

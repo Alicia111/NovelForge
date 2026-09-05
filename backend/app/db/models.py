@@ -21,7 +21,8 @@ class LLMConfig(SQLModel, table=True):
     display_name: Optional[str] = None
     model_name: str
     api_base: Optional[str] = None
-    api_key: str
+    # Optional：google provider 允许留空，改走 ADC（Vertex AI）鉴权
+    api_key: Optional[str] = None
     # 这里必须带 server_default，启动期自动补列逻辑才会认为它是“安全追加列”。
     # 仅有 Python 默认值不够，旧库在 ALTER TABLE 时需要数据库侧默认值来回填历史行。
     api_protocol: str = Field(

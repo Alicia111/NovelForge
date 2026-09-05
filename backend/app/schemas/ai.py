@@ -3,6 +3,9 @@ from typing import Optional, Dict, Any, List, Literal
 
 
 ContinuationWordControlMode = Literal["prompt_only", "balanced"]
+# per_run：目标字数是「本次续写最多写多少」，正文越写越长也不会失效
+# total：目标字数是「整章写到多少字为止」（旧口径）
+ContinuationWordBudgetScope = Literal["per_run", "total"]
 
 class ContinuationRequest(BaseModel):
     previous_content: str = Field(default="", description="已写的章节内容")
@@ -21,12 +24,23 @@ class ContinuationRequest(BaseModel):
     context_info: Optional[str] = Field(default=None, description="上下文信息，包括引用内容和事实子图")
     # 已有内容字数统计（用于指导续写长度）
     existing_word_count: Optional[int] = Field(default=None, description="已有章节正文的字数统计")
-    target_word_count: Optional[int] = Field(default=None, description="目标总字数")
+    target_word_count: Optional[int] = Field(
+        default=None,
+        description="字数预算数值；含义由 word_budget_scope 决定（本次输出上限 / 全章目标总字数）",
+    )
+    word_budget_scope: Optional[ContinuationWordBudgetScope] = Field(
+        default="per_run",
+        description="字数预算口径：per_run=本次续写最多输出多少字；total=整章写到多少字为止",
+    )
     word_control_mode: Optional[ContinuationWordControlMode] = Field(
         default=None,
         description="字数控制模式：prompt_only / balanced",
     )
     continuation_guidance: Optional[str] = Field(default=None, description="续写指导要求")
+    budget_baseline_word_count: Optional[int] = Field(
+        default=None,
+        description="per_run 口径的字数基线（本次续写开始时的正文字数），由预算运行时回灌",
+    )
     budget_round_hint: Optional[int] = Field(default=None, description="预算运行时回灌的当前轮次提示")
     remaining_word_count_hint: Optional[int] = Field(default=None, description="预算运行时回灌的剩余字数提示")
     is_final_round_hint: Optional[bool] = Field(default=None, description="预算运行时回灌的最后一轮标记")

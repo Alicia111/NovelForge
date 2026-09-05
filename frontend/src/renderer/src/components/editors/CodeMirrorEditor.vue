@@ -140,7 +140,7 @@
 			<div class="toolbar-status-spacer"></div>
 			<div class="ai-status-strip">
 				<span class="status-pill">模型 · {{ selectedModelName || '未设置' }}</span>
-				<span class="status-pill">目标 · {{ activeContinuationConfig.targetWordCount }} 字</span>
+				<span class="status-pill">{{ activeContinuationConfig.budgetScope === 'per_run' ? '本次' : '全章' }} · {{ activeContinuationConfig.targetWordCount }} 字</span>
 				<span class="status-pill">模式 · {{ formatContinuationMode(activeContinuationConfig.wordControlMode) }}</span>
 			</div>
 		</div>
@@ -171,18 +171,27 @@
                 <template v-if="nfAssistantPatchTotal">
                         建议 #{{ nfAssistantPatchCurrentNo }} / {{ nfAssistantPatchTotal }}：灰色为原文，蓝色为新文本
                 </template>
-                <template v-else>
+                <template v-else-if="pendingAiEdit && pendingAiEdit.originalFrom < pendingAiEdit.originalTo">
                         已生成替换建议：灰色为原文，蓝色为新文本
+                </template>
+                <template v-else>
+                        已生成内容，可采用、重新生成或撤销
                 </template>
         </span>
         <div class="review-actions">
                 <el-button v-if="nfAssistantPatchTotal > 1" size="small" @click="nfAssistantPatchPrev">上一条</el-button>
                 <el-button v-if="nfAssistantPatchTotal > 1" size="small" @click="nfAssistantPatchNext">下一条</el-button>
                 <el-button type="primary" size="small" @click="nfAssistantPatchTotal ? nfAssistantPatchAcceptCurrent() : acceptPendingAiEdit()">
-                        {{ nfAssistantPatchTotal ? '接受本条' : '接受并替换' }}
+                        {{ nfAssistantPatchTotal ? '接受本条' : (pendingAiEdit && pendingAiEdit.originalFrom < pendingAiEdit.originalTo ? '接受并替换' : '采用') }}
+                </el-button>
+                <el-button v-if="!nfAssistantPatchTotal && lastGenerationInvocation" size="small" @click="regeneratePendingAiEdit">
+                        重新生成
+                </el-button>
+                <el-button v-if="!nfAssistantPatchTotal && lastContinuationPayload" size="small" @click="regenerateContinuationWithGuidance">
+                        调整后重生成
                 </el-button>
                 <el-button size="small" @click="nfAssistantPatchTotal ? nfAssistantPatchRejectCurrent() : rejectPendingAiEdit()">
-                        {{ nfAssistantPatchTotal ? '拒绝本条' : '拒绝并还原' }}
+                        {{ nfAssistantPatchTotal ? '拒绝本条' : (pendingAiEdit && pendingAiEdit.originalFrom < pendingAiEdit.originalTo ? '拒绝并还原' : '撤销') }}
                 </el-button>
         </div>
 		</div>
@@ -292,8 +301,12 @@
 			v-model:visible="continuationDialogVisible"
 			:target-word-count="continuationDialogState.targetWordCount"
 			:word-control-mode="continuationDialogState.wordControlMode"
+			:budget-scope="continuationDialogState.budgetScope"
 			:guidance="continuationDialogState.guidance"
+			:title="continuationDialogTitle"
+			:confirm-text="continuationDialogConfirmText"
 			@confirm="handleContinuationDialogConfirm"
+			@cancel="handleContinuationDialogCancel"
 		/>
 
 		<el-dialog v-model="previewDialogVisible" title="动态信息预览" width="70%">
@@ -1176,7 +1189,7 @@ import {
 } from '@renderer/api/memory'
 import { ArrowDown, Document, MagicStick, CircleClose, Connection, List, Timer, Select, Loading } from '@element-plus/icons-vue'
 import AIPerCardParams from '../common/AIPerCardParams.vue'
-import ContinuationBudgetDialog, { type ContinuationWordControlMode } from './dialogs/ContinuationBudgetDialog.vue'
+import ContinuationBudgetDialog, { type ContinuationWordControlMode, type ContinuationWordBudgetScope } from './dialogs/ContinuationBudgetDialog.vue'
 import { resolveTemplate } from '@renderer/services/contextResolver'
 import { getCardContextTemplates, getContextTemplateByKind, normalizeContextTemplateKind, type ContextTemplateKind, type ContextTemplates } from '@renderer/services/contextSlots'
 import { notifyTaskDone } from '@renderer/utils/taskDoneNotifier'
@@ -1481,6 +1494,16 @@ const pendingAiEdit = ref<{
 	patchId?: number
 } | null>(null)
 
+// 记录最近一次 AI 生成调用的参数，供“重新生成”重放
+let lastGenerationInvocation: {
+	requestData: ContinuationRequest
+	replaceMode: boolean
+	taskName: string
+	replaceFrom?: number
+	replaceTo?: number
+	notifyKind?: EditorTaskDoneKind
+} | null = null
+
 let allowPendingPreviewDocMutation = false
 let lastPendingPreviewWarnAt = 0
 
@@ -1607,16 +1630,30 @@ const reviewCardSaving = ref(false)
 const dynamicPreviewApplying = ref(false)
 const relationsPreviewApplying = ref(false)
 const memoryPreviewApplying = ref(false)
-const continuationDialogVisible = ref(false)
-const continuationDialogState = reactive<{
+type ContinuationConfigPayload = {
 	targetWordCount: number
 	wordControlMode: ContinuationWordControlMode
+	budgetScope: ContinuationWordBudgetScope
 	guidance: string
-}>({
+}
+
+const continuationDialogVisible = ref(false)
+const continuationDialogState = reactive<ContinuationConfigPayload>({
 	targetWordCount: 3000,
 	wordControlMode: 'balanced',
+	budgetScope: 'per_run',
 	guidance: '',
 })
+// 'start' = 首次续写，'regenerate' = 改完指导要求后重生成
+const continuationDialogMode = ref<'start' | 'regenerate'>('start')
+const continuationDialogTitle = computed(() =>
+	continuationDialogMode.value === 'regenerate' ? '调整续写要求' : '续写配置'
+)
+const continuationDialogConfirmText = computed(() =>
+	continuationDialogMode.value === 'regenerate' ? '重新生成' : '开始续写'
+)
+// 上一次续写用的配置；为空表示当前待确认内容不是续写产生的
+const lastContinuationPayload = ref<ContinuationConfigPayload | null>(null)
 
 const memoryPreviewTitleResolved = computed(() => {
 	switch (memoryPreviewExtractorCode.value) {
@@ -1851,9 +1888,11 @@ function updateRelationEventSummaries(target: Record<string, any>, value: string
 const activeContinuationConfig = reactive<{
 	targetWordCount: number
 	wordControlMode: ContinuationWordControlMode
+	budgetScope: ContinuationWordBudgetScope
 }>({
 	targetWordCount: 3000,
 	wordControlMode: 'balanced',
+	budgetScope: 'per_run',
 })
 
 function isCanceledRequest(error: unknown): boolean {
@@ -2000,9 +2039,45 @@ function getSelectionWithLineInfo(): {
 	}
 }
 
-function resolveContinuationDefaults() {
+/** 续写指导要求的本地存档位置：本卡片一份，项目级一份作为新章节的默认值 */
+function continuationGuidanceKeys(): { card: string; project: string | null } {
+	const projectId = projectStore.currentProject?.id || (props.card as any).project_id
+	return {
+		card: `nf:chapter:continuation-guidance:${props.card.id}`,
+		project: Number.isFinite(projectId) ? `nf:project:continuation-guidance:${projectId}` : null,
+	}
+}
+
+function readStoredContinuationGuidance(): string {
+	try {
+		const keys = continuationGuidanceKeys()
+		const stored = localStorage.getItem(keys.card)
+		if (stored) return stored
+		return (keys.project && localStorage.getItem(keys.project)) || ''
+	} catch {
+		return ''
+	}
+}
+
+function writeStoredContinuationGuidance(guidance: string): void {
+	try {
+		const keys = continuationGuidanceKeys()
+		if (guidance) {
+			localStorage.setItem(keys.card, guidance)
+			if (keys.project) localStorage.setItem(keys.project, guidance)
+		} else {
+			localStorage.removeItem(keys.card)
+			if (keys.project) localStorage.removeItem(keys.project)
+		}
+	} catch {
+		// ignore localStorage errors
+	}
+}
+
+function resolveContinuationDefaults(): ContinuationConfigPayload {
 	let targetWordCount = 3000
 	let wordControlMode: ContinuationWordControlMode = 'balanced'
+	let budgetScope: ContinuationWordBudgetScope = 'per_run'
 	try {
 		const storedTarget = Number(localStorage.getItem(`nf:chapter:continuation-target:${props.card.id}`) || '')
 		if (Number.isFinite(storedTarget) && storedTarget > 0) targetWordCount = Math.floor(storedTarget)
@@ -2012,10 +2087,12 @@ function resolveContinuationDefaults() {
 		} else if (storedMode === 'strict') {
 			wordControlMode = 'balanced'
 		}
+		const storedScope = localStorage.getItem(`nf:chapter:continuation-scope:${props.card.id}`)
+		if (storedScope === 'per_run' || storedScope === 'total') budgetScope = storedScope
 	} catch {
 		// ignore localStorage errors
 	}
-	return { targetWordCount, wordControlMode, guidance: '' }
+	return { targetWordCount, wordControlMode, budgetScope, guidance: readStoredContinuationGuidance() }
 }
 
 function getText(): string {
@@ -2534,31 +2611,52 @@ async function executeAIContinuation() {
 	continuationDialogState.targetWordCount = defaults.targetWordCount
 	continuationDialogState.wordControlMode = defaults.wordControlMode
 	continuationDialogState.guidance = defaults.guidance
+	continuationDialogMode.value = 'start'
 	continuationDialogVisible.value = true
 }
 
-function handleContinuationDialogConfirm(payload: {
-	targetWordCount: number
-	wordControlMode: ContinuationWordControlMode
-	guidance: string
-}) {
+/** 带上一次的配置重开对话框，改完指导要求后丢弃当前预览再续写一遍 */
+function regenerateContinuationWithGuidance() {
+	if (!pendingAiEdit.value || !lastContinuationPayload.value) return
+	if (pendingAiEdit.value.generating) {
+		ElMessage.warning('正在生成中，请稍后')
+		return
+	}
+	const last = lastContinuationPayload.value
+	continuationDialogState.targetWordCount = last.targetWordCount
+	continuationDialogState.wordControlMode = last.wordControlMode
+	continuationDialogState.guidance = last.guidance
+	continuationDialogMode.value = 'regenerate'
+	continuationDialogVisible.value = true
+}
+
+/** 取消/关闭对话框时保留指导要求草稿，下次打开直接接着改 */
+function handleContinuationDialogCancel(payload: ContinuationConfigPayload) {
+	continuationDialogMode.value = 'start'
+	writeStoredContinuationGuidance(payload.guidance)
+	if (lastContinuationPayload.value) {
+		lastContinuationPayload.value = { ...lastContinuationPayload.value, guidance: payload.guidance }
+	}
+}
+
+function handleContinuationDialogConfirm(payload: ContinuationConfigPayload) {
+	if (continuationDialogMode.value === 'regenerate') discardPendingPreview()
+	continuationDialogMode.value = 'start'
 	activeContinuationConfig.targetWordCount = payload.targetWordCount
 	activeContinuationConfig.wordControlMode = payload.wordControlMode
+	activeContinuationConfig.budgetScope = payload.budgetScope
 	try {
 		localStorage.setItem(`nf:chapter:continuation-target:${props.card.id}`, String(payload.targetWordCount))
 		localStorage.setItem(`nf:chapter:continuation-mode:${props.card.id}`, payload.wordControlMode)
-		localStorage.removeItem(`nf:chapter:continuation-guidance:${props.card.id}`)
+		localStorage.setItem(`nf:chapter:continuation-scope:${props.card.id}`, payload.budgetScope)
 	} catch {
 		// ignore localStorage errors
 	}
+	writeStoredContinuationGuidance(payload.guidance)
 	void runContinuationWithConfig(payload)
 }
 
-async function runContinuationWithConfig(payload: {
-	targetWordCount: number
-	wordControlMode: ContinuationWordControlMode
-	guidance: string
-}) {
+async function runContinuationWithConfig(payload: ContinuationConfigPayload) {
 	if (!ensureNoPendingAiEdit()) return
 	const llmConfigId = resolveLlmConfigId()
 	if (!llmConfigId) { ElMessage.error('请先设置有效的模型ID'); return }
@@ -2598,6 +2696,7 @@ async function runContinuationWithConfig(payload: {
 	} as any
 	;(requestData as any).target_word_count = payload.targetWordCount
 	;(requestData as any).word_control_mode = payload.wordControlMode
+	;(requestData as any).word_budget_scope = payload.budgetScope
 	;(requestData as any).continuation_guidance = payload.guidance || undefined
 
 	try {
@@ -2614,9 +2713,15 @@ async function runContinuationWithConfig(payload: {
 
 	applyContinuationScope(requestData)
 
-	if (view) { view.focus(); const end = view.state.doc.length; view.dispatch({ selection: { anchor: end } }) }
+	if (!view) return
+	view.focus()
+	const end = view.state.doc.length
+	view.dispatch({ selection: { anchor: end } })
 
-	executeAIGeneration(requestData, false, '续写', undefined, undefined, 'continue')
+	// 走“待确认预览”流程（与润色/扩写共用 pendingAiEdit），
+	// 这样续写完成后才会出现“采用 / 重新生成 / 撤销”操作栏
+	lastContinuationPayload.value = payload
+	executeAIGeneration(requestData, true, '续写', end, end, 'continue')
 }
 
 function handlePolishPromptChange(promptName: string) {
@@ -2916,6 +3021,13 @@ function rejectPendingAiEdit() {
 	if (pendingAiEdit.value.generating) {
 		interruptStream()
 	}
+	discardPendingPreview()
+	ElMessage.info('已拒绝替换，保留原文')
+}
+
+/** 移除待确认的预览文本并还原光标，不弹任何提示 */
+function discardPendingPreview() {
+	if (!view || !pendingAiEdit.value) return
 	const pending = pendingAiEdit.value
 	runWithPendingPreviewMutation(() => {
 		view!.dispatch({
@@ -2925,7 +3037,24 @@ function rejectPendingAiEdit() {
 	})
 	pendingAiEdit.value = null
 	clearHighlight()
-	ElMessage.info('已拒绝替换，保留原文')
+}
+
+function regeneratePendingAiEdit() {
+	if (!view || !pendingAiEdit.value || !lastGenerationInvocation) return
+	if (pendingAiEdit.value.generating) {
+		ElMessage.warning('正在生成中，请稍后')
+		return
+	}
+	const invocation = lastGenerationInvocation
+	discardPendingPreview()
+	executeAIGeneration(
+		invocation.requestData,
+		invocation.replaceMode,
+		invocation.taskName,
+		invocation.replaceFrom,
+		invocation.replaceTo,
+		invocation.notifyKind
+	)
 }
 
 function executeAIGeneration(
@@ -2936,10 +3065,14 @@ function executeAIGeneration(
 	replaceTo?: number,
 	notifyKind?: EditorTaskDoneKind
 ) {
+	lastGenerationInvocation = { requestData, replaceMode, taskName, replaceFrom, replaceTo, notifyKind }
+	// 只有续写才能「调整后重生成」，其余任务走各自的入口
+	if (notifyKind !== 'continue') lastContinuationPayload.value = null
 	let accumulated = ''
 	let isFirstChunk = true
 	let outputStartPos = replaceFrom ?? 0
 	let currentOutputLength = 0
+	let hadError = false
 	aiStreamCanceled = false
 
 	if (view) {
@@ -2990,12 +3123,17 @@ function executeAIGeneration(
 						currentOutputLength += normalized.length
 						if (pendingAiEdit.value) {
 							pendingAiEdit.value.previewTo = pos + normalized.length
-							setCompareHighlight(
-								pendingAiEdit.value.originalFrom,
-								pendingAiEdit.value.originalTo,
-								pendingAiEdit.value.previewFrom,
-								pendingAiEdit.value.previewTo
-							)
+							if (pendingAiEdit.value.originalFrom < pendingAiEdit.value.originalTo) {
+								setCompareHighlight(
+									pendingAiEdit.value.originalFrom,
+									pendingAiEdit.value.originalTo,
+									pendingAiEdit.value.previewFrom,
+									pendingAiEdit.value.previewTo
+								)
+							} else {
+								// 纯插入（如续写）：没有被替换的原文，直接高亮新内容
+								updateHighlight(pendingAiEdit.value.previewFrom, pendingAiEdit.value.previewTo)
+							}
 						} else {
 							updateHighlight(outputStartPos, outputStartPos + currentOutputLength)
 						}
@@ -3015,8 +3153,27 @@ function executeAIGeneration(
 			aiStreamCanceled = false
 			aiLoading.value = false
 			streamHandle = null
+			if (hadError) {
+				// 错误提示已在 onError 中显示，避免流结束时再叠加一次“完成”提示
+				return
+			}
 			if (replaceMode && pendingAiEdit.value) {
 				pendingAiEdit.value.generating = false
+			}
+			if (!accumulated.trim() && !wasCanceled) {
+				// 没有任何内容产出（例如被安全策略拦截但未能识别为error事件的极端情况）
+				if (replaceMode && view && pendingAiEdit.value) {
+					runWithPendingPreviewMutation(() => {
+						view!.dispatch({
+							changes: { from: pendingAiEdit.value!.previewFrom, to: pendingAiEdit.value!.previewTo, insert: '' },
+							selection: { anchor: pendingAiEdit.value!.originalTo }
+						})
+					})
+					pendingAiEdit.value = null
+				}
+				clearHighlight()
+				ElMessage.error(`${taskName}未生成任何内容，可能被内容安全策略拦截，请调整描述后重试`)
+				return
 			}
 			try {
 				if (!replaceMode) {
@@ -3037,6 +3194,7 @@ function executeAIGeneration(
 			}
 		},
 		(error) => {
+			hadError = true
 			aiStreamCanceled = false
 			aiLoading.value = false
 			streamHandle = null
@@ -3055,7 +3213,8 @@ function executeAIGeneration(
 			}
 			clearHighlight()
 			console.error(`${taskName}失败:`, error)
-			ElMessage.error(`${taskName}失败`)
+			const msg = error?.message
+			ElMessage.error(msg ? `${taskName}失败：${msg}` : `${taskName}失败`)
 		}
 	)
 }
@@ -3064,6 +3223,13 @@ function interruptStream() {
 	try { reviewAbortController.value?.abort(); } catch {}
 	if (streamHandle) aiStreamCanceled = true
 	try { streamHandle?.cancel(); } catch {}
+	aiLoading.value = false
+	// 兜底：正常情况下 onClose/onError 会把 generating 置为 false，
+	// 但如果流已经卡死、回调迟迟不触发，这里直接解锁，
+	// 避免用户被“请先接受或拒绝当前替换建议”卡死在编辑器里出不来
+	if (pendingAiEdit.value?.generating) {
+		pendingAiEdit.value.generating = false
+	}
 }
 
 function applyContinuationScope(requestData: ContinuationRequest) {
@@ -3868,6 +4034,7 @@ onMounted(() => {
 	const defaults = resolveContinuationDefaults()
 	activeContinuationConfig.targetWordCount = defaults.targetWordCount
 	activeContinuationConfig.wordControlMode = defaults.wordControlMode
+	activeContinuationConfig.budgetScope = defaults.budgetScope
 	try {
 		const title = props.card?.title || ''
 		const vol = Number((props.contextParams as any)?.volume_number ?? (props.card as any)?.content?.volume_number ?? NaN)

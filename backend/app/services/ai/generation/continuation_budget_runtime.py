@@ -17,6 +17,7 @@ _OUTLINE_BOUNDARY_HINT = (
 @dataclass(frozen=True)
 class ContinuationRoundPlan:
     mode: str
+    budget_scope: str
     round_index: int
     max_rounds: int
     rounds_left: int
@@ -38,6 +39,12 @@ class ContinuationTrimResult:
 
 def count_text_units(text: str | None) -> int:
     return len("".join((text or "").split()))
+
+
+def normalize_budget_scope(request: ContinuationRequest) -> str:
+    """字数预算口径。默认 per_run：目标字数指「本次最多写多少」。"""
+    raw_scope = str(getattr(request, "word_budget_scope", "") or "").strip().lower()
+    return raw_scope if raw_scope in {"per_run", "total"} else "per_run"
 
 
 def normalize_word_control_mode(request: ContinuationRequest) -> str:
@@ -68,6 +75,7 @@ def build_round_plan(
     round_index: int,
 ) -> ContinuationRoundPlan:
     mode = normalize_word_control_mode(request)
+    budget_scope = normalize_budget_scope(request)
     target_word_count = getattr(request, "target_word_count", None)
     remaining_word_count = _resolve_remaining_word_count(request, current_word_count)
     max_rounds = _estimate_round_cap(mode, target_word_count, current_word_count)
@@ -75,6 +83,7 @@ def build_round_plan(
     if mode == "prompt_only":
         return ContinuationRoundPlan(
             mode=mode,
+            budget_scope=budget_scope,
             round_index=1,
             max_rounds=1,
             rounds_left=1,
@@ -114,6 +123,7 @@ def build_round_plan(
     )
     return ContinuationRoundPlan(
         mode=mode,
+        budget_scope=budget_scope,
         round_index=round_index,
         max_rounds=max_rounds,
         rounds_left=rounds_left,
@@ -137,9 +147,16 @@ def build_budget_hint_text(
     lines: list[str] = ["【续写预算】", f"- 当前总字数：{plan.current_word_count} 字"]
 
     if plan.target_word_count is not None:
-        lines.append(f"- 目标总字数：{plan.target_word_count} 字")
+        if plan.budget_scope == "per_run":
+            lines.append(
+                f"- 本次续写篇幅上限：约 {plan.target_word_count} 字"
+                "（这是本次要新写的字数，不是全章总字数，不要为了凑全章字数而拉长）"
+            )
+        else:
+            lines.append(f"- 目标总字数：{plan.target_word_count} 字")
     if plan.remaining_word_count is not None:
-        lines.append(f"- 剩余字数：约 {max(plan.remaining_word_count, 0)} 字")
+        label = "本次剩余可写" if plan.budget_scope == "per_run" else "剩余字数"
+        lines.append(f"- {label}：约 {max(plan.remaining_word_count, 0)} 字")
     if plan.mode != "prompt_only":
         if plan.is_final_round:
             lines.append(f"- 当前轮次：第 {plan.round_index} 轮（本轮收尾）")
@@ -215,6 +232,14 @@ def _resolve_remaining_word_count(request: ContinuationRequest, current_word_cou
     target_word_count = getattr(request, "target_word_count", None)
     if target_word_count is None:
         return 0
+
+    if normalize_budget_scope(request) == "per_run":
+        # 基线由运行时在开轮前回灌；单轮调用时退回当前字数，等价于「本轮写 target 字」
+        baseline = getattr(request, "budget_baseline_word_count", None)
+        if baseline is None:
+            baseline = current_word_count
+        return max(baseline + target_word_count - current_word_count, 0)
+
     return max(target_word_count - current_word_count, 0)
 
 

@@ -24,6 +24,7 @@ def sync_builtin_seed(
     description = getattr(record, "description")
     content = getattr(record, content_field)
     is_builtin = bool(getattr(record, "built_in", False))
+    is_modified = bool(getattr(record, "is_modified", False))
 
     if not is_builtin and (content != seed_content or description != seed_description):
         return "conflict", False
@@ -33,7 +34,11 @@ def sync_builtin_seed(
     changed |= _set_if_changed(record, original_content_field, seed_content)
     changed |= _set_if_changed(record, "built_in", True)
 
-    if overwrite or not is_builtin:
+    # 用户已在 UI 里手动修改过的内置项不再被自动覆盖，否则每次后端重启
+    # （overwrite 默认开启，用于同步内置种子的上游更新）都会把用户的
+    # 自定义内容重置回种子文件，is_modified 标记也就形同虚设。
+    # 用户仍可通过“重置”按钮主动恢复为种子内容。
+    if (overwrite and not is_modified) or not is_builtin:
         changed |= _set_if_changed(record, content_field, seed_content)
         changed |= _set_if_changed(record, "description", seed_description)
         changed |= _set_if_changed(record, "is_modified", False)

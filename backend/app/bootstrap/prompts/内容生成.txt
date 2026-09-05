@@ -26,6 +26,7 @@
 
 - knowledge:
     - @KB{ name=文风约束 }
+    - @KB{ name=成人向创作准则 }
 
 ---
 

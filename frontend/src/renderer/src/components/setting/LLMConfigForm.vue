@@ -32,7 +32,7 @@
         v-model="form.api_key"
         type="password"
         :input-props="{ autocomplete: 'new-password', name: 'api_key_no_fill' }"
-        placeholder="API密钥将直接保存在后端"
+        :placeholder="form.provider === 'google' ? '留空则使用 ADC（Vertex AI，适用于组织禁用 API Key 的情况）' : 'API密钥将直接保存在后端'"
         show-password
       />
     </el-form-item>
@@ -273,7 +273,19 @@ const querySearch = (queryString: string, cb: any) => {
 const rules = reactive<FormRules>({
   provider: [{ required: true, message: '请选择提供商', trigger: 'change' }],
   model_name: [{ required: true, message: '请输入模型名称', trigger: 'blur' }],
-  api_key: [{ required: true, message: '请输入API Key', trigger: 'blur' }],
+  // Google 允许留空 API Key，走 ADC（Vertex AI）鉴权；其他供应商仍强制要求
+  api_key: [
+    {
+      validator: (_rule, value, callback) => {
+        if (!value && form.provider !== 'google') {
+          callback(new Error('请输入API Key'))
+        } else {
+          callback()
+        }
+      },
+      trigger: 'blur',
+    },
+  ],
   token_limit: [{ required: true, message: '请输入Token上限', trigger: 'blur' }],
   call_limit: [{ required: true, message: '请输入调用次数上限', trigger: 'blur' }],
 })
@@ -369,7 +381,7 @@ async function handleSubmit() {
 }
 
 async function handleFetchModels() {
-  if (!form.api_key) {
+  if (!form.api_key && form.provider !== 'google') {
     ElMessage.warning('请先输入API Key')
     return
   }

@@ -45,7 +45,14 @@ export default defineConfig({
     }
   ],
   server: {
-    port: 5173,
+    host: true, // 监听所有网卡，方便通过局域网 / Tailscale 内网 IP 访问
+    // Vite 5+ 默认只接受识别的 Host 请求头；局域网 / Tailscale MagicDNS 主机名
+    // （如 nekolia、nekolia.tail117e62.ts.net）访问时会被拒绝，这里放开检查
+    allowedHosts: true,
+    // 5173 已被本机其他容器（ai-novel-frontend）长期占用，
+    // 不锁端口时 vite 会静默退到 5174，导致开发中的改动看起来「没生效」
+    port: 5273,
+    strictPort: true,
     proxy: {
       '/api': {
         target: backendOrigin,
@@ -56,6 +63,15 @@ export default defineConfig({
         changeOrigin: true,
       }
     }
+  },
+  // 手机 / 平板走打包后的产物，避免 dev server 上千个模块请求逐个吃 RTT。
+  // preview 不会继承 server 的这些设置，需要显式再写一遍。
+  preview: {
+    host: true,
+    allowedHosts: true,
+    // 与 dev 的 5273 对齐命名；strictPort 让端口冲突直接报错而不是静默漂移
+    port: 4273,
+    strictPort: true
   },
   build: {
     outDir: '../../dist-web',
