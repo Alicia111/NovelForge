@@ -52,6 +52,7 @@ def init_knowledge(session: Session) -> None:
     updated = 0
     migrated = 0
     conflicts = 0
+    preserved = 0
 
     for name, seed in get_all_knowledge_files().items():
         existing_item = existing.get(name)
@@ -85,6 +86,10 @@ def init_knowledge(session: Session) -> None:
             )
         elif result == "migrated":
             migrated += 1
+        elif result == "preserved":
+            # 用户改过的内置项：内容保留，只刷新了 original_* 快照，
+            # 不能计入“覆盖更新”，否则日志数字与实际行为不符。
+            preserved += 1
         elif overwrite and changed:
             updated += 1
 
@@ -94,9 +99,11 @@ def init_knowledge(session: Session) -> None:
     if state_changed:
         session.commit()
         logger.info(
-            "知识库初始化完成：新增 {}，覆盖更新 {}，兼容迁移 {}，冲突 {}（overwrite={}）",
+            "知识库初始化完成：新增 {}，覆盖更新 {}，保留用户修改 {}，"
+            "兼容迁移 {}，冲突 {}（overwrite={}）",
             created,
             updated,
+            preserved,
             migrated,
             conflicts,
             overwrite,
