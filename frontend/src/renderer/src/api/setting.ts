@@ -8,12 +8,12 @@ export type KnowledgeUpdate = components['schemas']['KnowledgeUpdate']
 // 知识库 API（request 已解包 ApiResponse<T>，此处直接返回 T）
 export async function listKnowledge(skip?: number, limit?: number): Promise<Knowledge[]> {
   const params = skip === undefined && limit === undefined ? undefined : { skip, limit }
-  const resp = await request.get<Knowledge[]>('/knowledge', params)
+  const resp = await request.get<Knowledge[]>('/knowledge/', params)
   return resp
 }
 
 export async function createKnowledge(body: KnowledgeCreate): Promise<Knowledge> {
-  const resp = await request.post<Knowledge>('/knowledge', body)
+  const resp = await request.post<Knowledge>('/knowledge/', body)
   return resp
 }
 
@@ -131,9 +131,9 @@ export type PromptCreate = components['schemas']['PromptCreate']
 export type PromptUpdate = components['schemas']['PromptUpdate']
 export async function listPrompts(skip?: number, limit?: number): Promise<Prompt[]> {
   const params = skip === undefined && limit === undefined ? undefined : { skip, limit }
-  return await request.get<Prompt[]>('/prompts', params)
+  return await request.get<Prompt[]>('/prompts/', params)
 }
-export async function createPrompt(body: PromptCreate): Promise<void> { await request.post('/prompts', body) }
+export async function createPrompt(body: PromptCreate): Promise<void> { await request.post('/prompts/', body) }
 export async function updatePrompt(id: number, body: PromptUpdate): Promise<void> { await request.put(`/prompts/${id}`, body) }
 export async function deletePrompt(id: number): Promise<void> { await request.delete(`/prompts/${id}`) }
 export async function resetPrompt(id: number): Promise<Prompt> { return await request.post<Prompt>(`/prompts/${id}/reset`, {}) }
